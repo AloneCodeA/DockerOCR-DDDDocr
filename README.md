@@ -23,7 +23,6 @@ FlaskOCRService is a lightweight application that processes base64-encoded image
 
 ### 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/FlaskOCRService.git
 cd FlaskOCRService
 ```
 
