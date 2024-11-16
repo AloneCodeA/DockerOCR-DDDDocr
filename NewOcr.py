@@ -1,101 +1,93 @@
-from flask import Flask, request
-import numpy as np
-import cv2 as cv
+import os
+from flask import Flask, request, jsonify
+import mysql.connector
+from mysql.connector import Error
 import base64
+from io import BytesIO
 from PIL import Image
 import ddddocr
-import random
-import io
-from io import BytesIO
+from datetime import datetime
 
 app = Flask(__name__)
 
-# Initialize the OCR model
+# Database configuration from environment variables
+db_config = {
+    'host': os.getenv('DB_HOST'),
+    'port': int(os.getenv('DB_PORT', 1337)), 
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'database': os.getenv('DB_NAME')
+}
+
 ocr = ddddocr.DdddOcr()
 
-def process_image_and_recognize(image_data, bin_threshold=58, bin_increment=2, retry_attempts=5):
-    """
-    Processes the base64-encoded image, applies thresholding, and performs OCR.
-    
-    Args:
-    - image_data (str): Base64-encoded image string.
-    - bin_threshold (int): The initial threshold value for blue channel comparison.
-    - bin_increment (int): Increment applied to the threshold in each retry.
-    - retry_attempts (int): Number of times to retry OCR with increased threshold.
-    
-    Returns:
-    - str: Recognized result or a random 2-digit number if OCR fails.
-    """
-    image_bytes = base64.b64decode(image_data)
-    image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-    results = []
+# Function to validate user
+def is_user_valid(device_id, session_id):
+    if session_id == '0':
+        return False
 
-    for _ in range(retry_attempts):
-        img_array = np.array(image)
-        
-        # Apply binary threshold based on blue channel intensity
-        for i in range(img_array.shape[1]):
-            for j in range(img_array.shape[0]):
-                (red, green, blue) = img_array[j, i]
-                if (blue - red > bin_threshold) or (blue - green > bin_threshold):
-                    img_array[j, i] = [255, 255, 255]  # Set to white
-                else:
-                    img_array[j, i] = [0, 0, 0]  # Set to black
+    try:
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor()
+        query = """
+            SELECT COUNT(*)
+            FROM user_sessions
+            WHERE device_id = %s
+              AND session_id = %s
+              AND subscription_date >= %s
+        """
+        current_date = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute(query, (device_id, session_id, current_date))
+        result = cursor.fetchone()
+        return result[0] > 0
+    except Error:
+        return False
+    finally:
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+        if 'connection' in locals() and connection:
+            connection.close()
 
-        processed_image = Image.fromarray(img_array)
+# Function to process image and perform OCR
+def process_image_and_recognize(image_data):
+    try:
+        image_bytes = base64.b64decode(image_data)
+        image = Image.open(BytesIO(image_bytes)).convert('RGB')
+        image_bytes = BytesIO()
+        image.save(image_bytes, format="PNG")
+        result = ocr.classification(image_bytes.getvalue())
+        return result
+    except Exception:
+        return None
 
-        # Convert processed image to bytes
-        with BytesIO() as output:
-            processed_image.save(output, format="PNG")
-            image_bytes = output.getvalue()
-
-        # Perform OCR
-        ocr_result = ocr.classification(image_bytes)
-
-        # Correct commonly confused characters
-        corrected_result = (
-            ocr_result.replace('o', '0').replace('O', '0')
-            .replace('i', '1').replace('I', '1')
-            .replace('l', '1').replace('s', '5')
-            .replace('S', '5').replace('z', '2')
-            .replace('Z', '2').replace('b', '6')
-        )
-
-        # Check if the result is a valid 2-digit number
-        if len(corrected_result) == 2 and corrected_result.isdigit():
-            results.append(corrected_result)
-
-        # Increase threshold for the next retry
-        bin_threshold += bin_increment
-
-    # Return the most common result or a random 2-digit number if none found
-    if results:
-        return max(set(results), key=results.count)
-    else:
-        return "{:02d}".format(random.randint(1, 99))
-
-
-@app.route('/', methods=['GET'])
-def ping():
-    """
-    Basic route to check if the server is running.
-    """
-    return "Working"
-
+# Route to handle OCR request
 @app.route('/ocr/b64', methods=['POST'])
 def ocr_service():
-    """
-    OCR service that accepts base64-encoded image data in POST request.
-    """
     try:
-        request_data = request.get_data().decode('utf-8')
-        if request_data:
-            result = process_image_and_recognize(request_data)
-            return result, 200
+        request_data = request.get_json()
+
+        if not request_data or 'device_id' not in request_data or 'session_id' not in request_data:
+            return jsonify({"error": "Missing device_id or session_id in request body"}), 400
+
+        device_id = request_data['device_id']
+        session_id = request_data['session_id']
+
+        if not is_user_valid(device_id, session_id):
+            return jsonify({"error": "Invalid user"}), 403
+
+        if 'image' not in request_data:
+            return jsonify({"error": "Missing 'image' key in request body"}), 400
+
+        image_data = request_data['image']
+        result = process_image_and_recognize(image_data)
+
+        if result:
+            return jsonify({"ocr_result": result}), 200
         else:
-            return "No image data provided", 400
+            return jsonify({"error": "Failed to process image"}), 500
+
     except Exception as e:
-        return str(e), 500
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3049, debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv('PORT', 1337)), debug=True)
