@@ -1,5 +1,5 @@
 import os
-from app import app
+from NewOcr import app
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT",1337))
