@@ -76,7 +76,7 @@ def ocr_service():
             return jsonify({"error": "Invalid user"}), 403
 
         if 'image' not in request_data:
-            return jsonify({"error": "Missing 'image' key in request body"}), 400
+            return jsonify({"error": "Missing 'image' key in request body"}), 402
 
         image_data = request_data['image']
         result = process_image_and_recognize(image_data)
@@ -84,7 +84,7 @@ def ocr_service():
         if result:
             return jsonify({"ocr_result": result}), 200
         else:
-            return jsonify({"error": "Failed to process image"}), 500
+            return jsonify({"error": "Failed to process image"}), 501
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
