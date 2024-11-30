@@ -30,16 +30,17 @@ def is_user_valid(device_id, session_id):
         connection = mysql.connector.connect(**db_config)
         cursor = connection.cursor()
         query = """
-            SELECT COUNT(*)
+            SELECT 1
             FROM user_sessions
             WHERE device_id = %s
               AND session_id = %s
               AND subscription_date >= %s
+            LIMIT 1
         """
         current_date = datetime.now().strftime('%Y-%m-%d')
         cursor.execute(query, (device_id, session_id, current_date))
         result = cursor.fetchone()
-        return result[0] > 0
+        return result is not None  # 若存在匹配行，返回 True
     except Error:
         return False
     finally:
@@ -47,6 +48,7 @@ def is_user_valid(device_id, session_id):
             cursor.close()
         if 'connection' in locals() and connection:
             connection.close()
+
 
 # Function to process image and perform OCR
 def process_image_and_recognize(image_data):
