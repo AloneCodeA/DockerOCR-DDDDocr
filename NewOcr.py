@@ -1,16 +1,16 @@
 import os
-from flask import Flask, request, jsonify
-import mysql.connector
-from mysql.connector import Error
 import base64
 from io import BytesIO
-from PIL import Image
-import ddddocr
 from datetime import datetime
+from flask import Flask, request, jsonify
+from PIL import Image
+import mysql.connector
+from mysql.connector import Error
+import ddddocr
 
 app = Flask(__name__)
 
-# Database configuration from environment variables
+# 資料庫設定
 db_config = {
     'host': os.getenv('DB_HOST'),
     'port': int(os.getenv('DB_PORT', 1337)), 
@@ -21,7 +21,26 @@ db_config = {
 
 ocr = ddddocr.DdddOcr()
 
-# 驗證使用者是否合法
+# ✅ 抽出共用請求解析邏輯
+def extract_request_fields(data):
+    missing = []
+    device_id = data.get('device_id')
+    session_id = data.get('session_id')
+    image_data = data.get('image')
+
+    if not device_id:
+        missing.append("device_id")
+    if not session_id:
+        missing.append("session_id")
+    if not image_data:
+        missing.append("image")
+
+    if missing:
+        return None, None, None, jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
+
+    return device_id, session_id, image_data, None, None
+
+# ✅ 驗證使用者是否合法
 def is_user_valid(device_id, session_id):
     if session_id == '0':
         return False
@@ -37,100 +56,65 @@ def is_user_valid(device_id, session_id):
               AND subscription_date >= %s
             LIMIT 1
         """
-        current_date = datetime.now().strftime('%Y-%m-%d')
-        cursor.execute(query, (device_id, session_id, current_date))
-        result = cursor.fetchone()
-        return result is not None
+        cursor.execute(query, (device_id, session_id, datetime.now().strftime('%Y-%m-%d')))
+        return cursor.fetchone() is not None
     except Error:
         return False
     finally:
-        if 'cursor' in locals() and cursor:
+        if 'cursor' in locals():
             cursor.close()
-        if 'connection' in locals() and connection:
+        if 'connection' in locals():
             connection.close()
 
-# OCR 處理邏輯（支援自訂範圍與空格）
+# ✅ 處理圖片並執行 OCR，支援自訂範圍與機率模式
 def create_ocr_result(image_data, charset_range=None):
     try:
         image_bytes = base64.b64decode(image_data)
         image = Image.open(BytesIO(image_bytes)).convert('RGB')
-        image_bytes = BytesIO()
-        image.save(image_bytes, format="PNG")
-        img_data = image_bytes.getvalue()
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        img_data = buffer.getvalue()
 
         if charset_range is not None:
             ocr.set_ranges(charset_range)
             result = ocr.classification(img_data, probability=True)
-
-            # 將機率最高的字符組合成結果
-            s = ''
-            for i in result['probability']:
-                s += result['charsets'][i.index(max(i))]
-            return s
+            return ''.join(result['charsets'][i.index(max(i))] for i in result['probability'])
         else:
             return ocr.classification(img_data)
 
     except Exception:
         return None
 
-# 路由：僅辨識數字（0-9）
+# ✅ 通用處理函數
+def handle_ocr_request(charset_range=None):
+    try:
+        request_data = request.get_json()
+        device_id, session_id, image_data, error_response, status = extract_request_fields(request_data)
+        if error_response:
+            return error_response, status
+
+        if not is_user_valid(device_id, session_id):
+            return jsonify({"error": "Invalid user"}), 403
+
+        result = create_ocr_result(image_data, charset_range)
+        if result:
+            return jsonify({"ocr_result": result}), 200
+        else:
+            return jsonify({"error": "Failed to process image"}), 501
+
+    except Exception as e:
+        return jsonify({"error": f"Internal error: {str(e)}"}), 500
+
+# 路由：純數字
 @app.route('/ocr/b64', methods=['POST'])
-def ocr_service_digits():
-    try:
-        request_data = request.get_json()
+def ocr_digits():
+    return handle_ocr_request(charset_range=0)
 
-        if not request_data or 'device_id' not in request_data or 'session_id' not in request_data:
-            return jsonify({"error": "Missing device_id or session_id in request body"}), 400
-
-        device_id = request_data['device_id']
-        session_id = request_data['session_id']
-
-        if not is_user_valid(device_id, session_id):
-            return jsonify({"error": "Invalid user"}), 403
-
-        if 'image' not in request_data:
-            return jsonify({"error": "Missing 'image' key in request body"}), 402
-
-        image_data = request_data['image']
-        result = create_ocr_result(image_data, charset_range=0)  # 0 = 數字
-
-        if result:
-            return jsonify({"ocr_result": result}), 200
-        else:
-            return jsonify({"error": "Failed to process image"}), 501
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# 路由：辨識小寫英文 + 空格
+# 路由：小寫英文 + 空格
 @app.route('/ocr/b64/eng', methods=['POST'])
-def ocr_service_lowercase_with_space():
-    try:
-        request_data = request.get_json()
+def ocr_lowercase_with_space():
+    return handle_ocr_request(charset_range="abcdefghijklmnopqrstuvwxyz ")
 
-        if not request_data or 'device_id' not in request_data or 'session_id' not in request_data:
-            return jsonify({"error": "Missing device_id or session_id in request body"}), 400
-
-        device_id = request_data['device_id']
-        session_id = request_data['session_id']
-
-        if not is_user_valid(device_id, session_id):
-            return jsonify({"error": "Invalid user"}), 403
-
-        if 'image' not in request_data:
-            return jsonify({"error": "Missing 'image' key in request body"}), 402
-
-        image_data = request_data['image']
-        result = create_ocr_result(image_data, charset_range="abcdefghijklmnopqrstuvwxyz ")
-
-        if result:
-            return jsonify({"ocr_result": result}), 200
-        else:
-            return jsonify({"error": "Failed to process image"}), 501
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# 啟動 Flask App
+# 啟動 Flask
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv('PORT', 1337)), debug=True)
