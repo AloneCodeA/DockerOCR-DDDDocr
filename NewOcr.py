@@ -19,15 +19,13 @@ db_config = {
     'database': os.getenv('DB_NAME')
 }
 
-# 初始化 OCR 模型
-ocr_cn = ddddocr.DdddOcr()
-ocr_eng = ddddocr.DdddOcr(show_ad=False, ocr=True)
+ocr = ddddocr.DdddOcr()
 
-
-# 驗證用戶是否有效
+# 驗證使用者是否合法
 def is_user_valid(device_id, session_id):
     if session_id == '0':
         return False
+
     try:
         connection = mysql.connector.connect(**db_config)
         cursor = connection.cursor()
@@ -41,74 +39,98 @@ def is_user_valid(device_id, session_id):
         """
         current_date = datetime.now().strftime('%Y-%m-%d')
         cursor.execute(query, (device_id, session_id, current_date))
-        return cursor.fetchone() is not None
+        result = cursor.fetchone()
+        return result is not None
     except Error:
         return False
     finally:
-        if 'cursor' in locals(): cursor.close()
-        if 'connection' in locals(): connection.close()
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+        if 'connection' in locals() and connection:
+            connection.close()
 
-
-# 解碼 base64 並轉換為圖片 bytes
-def extract_image_bytes(image_b64):
+# OCR 處理邏輯（支援自訂範圍與空格）
+def create_ocr_result(image_data, charset_range=None):
     try:
-        image_bytes = base64.b64decode(image_b64)
+        image_bytes = base64.b64decode(image_data)
         image = Image.open(BytesIO(image_bytes)).convert('RGB')
-        output = BytesIO()
-        image.save(output, format="PNG")
-        return output.getvalue()
+        image_bytes = BytesIO()
+        image.save(image_bytes, format="PNG")
+        img_data = image_bytes.getvalue()
+
+        if charset_range is not None:
+            ocr.set_ranges(charset_range)
+            result = ocr.classification(img_data, probability=True)
+
+            # 將機率最高的字符組合成結果
+            s = ''
+            for i in result['probability']:
+                s += result['charsets'][i.index(max(i))]
+            return s
+        else:
+            return ocr.classification(img_data)
+
     except Exception:
         return None
 
-
-# 通用 OCR 路由處理函式
-def handle_ocr_request(request_data, ocr_engine):
-    if not request_data:
-        return jsonify({"error": "Missing JSON body"}), 400
-
-    device_id = request_data.get('device_id')
-    session_id = request_data.get('session_id')
-    image_data = request_data.get('image')
-
-    if not device_id or not session_id:
-        return jsonify({"error": "Missing device_id or session_id"}), 400
-
-    if not is_user_valid(device_id, session_id):
-        return jsonify({"error": "Invalid user"}), 403
-
-    if not image_data:
-        return jsonify({"error": "Missing 'image' key in request body"}), 402
-
-    image_bytes = extract_image_bytes(image_data)
-    if image_bytes is None:
-        return jsonify({"error": "Invalid or corrupt image data"}), 400
-
-    result = ocr_engine.classification(image_bytes)
-    if result:
-        return jsonify({"ocr_result": result}), 200
-    else:
-        return jsonify({"error": "Failed to process image"}), 501
-
-
-# 中文驗證碼 OCR
+# 路由：僅辨識數字（0-9）
 @app.route('/ocr/b64', methods=['POST'])
-def ocr_service():
+def ocr_service_digits():
     try:
         request_data = request.get_json()
-        return handle_ocr_request(request_data, ocr_cn)
+
+        if not request_data or 'device_id' not in request_data or 'session_id' not in request_data:
+            return jsonify({"error": "Missing device_id or session_id in request body"}), 400
+
+        device_id = request_data['device_id']
+        session_id = request_data['session_id']
+
+        if not is_user_valid(device_id, session_id):
+            return jsonify({"error": "Invalid user"}), 403
+
+        if 'image' not in request_data:
+            return jsonify({"error": "Missing 'image' key in request body"}), 402
+
+        image_data = request_data['image']
+        result = create_ocr_result(image_data, charset_range=0)  # 0 = 數字
+
+        if result:
+            return jsonify({"ocr_result": result}), 200
+        else:
+            return jsonify({"error": "Failed to process image"}), 501
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-# 英文 OCR
+# 路由：辨識小寫英文 + 空格
 @app.route('/ocr/b64/eng', methods=['POST'])
-def ocr_service_eng():
+def ocr_service_lowercase_with_space():
     try:
         request_data = request.get_json()
-        return handle_ocr_request(request_data, ocr_eng)
+
+        if not request_data or 'device_id' not in request_data or 'session_id' not in request_data:
+            return jsonify({"error": "Missing device_id or session_id in request body"}), 400
+
+        device_id = request_data['device_id']
+        session_id = request_data['session_id']
+
+        if not is_user_valid(device_id, session_id):
+            return jsonify({"error": "Invalid user"}), 403
+
+        if 'image' not in request_data:
+            return jsonify({"error": "Missing 'image' key in request body"}), 402
+
+        image_data = request_data['image']
+        result = create_ocr_result(image_data, charset_range="abcdefghijklmnopqrstuvwxyz ")
+
+        if result:
+            return jsonify({"ocr_result": result}), 200
+        else:
+            return jsonify({"error": "Failed to process image"}), 501
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
+# 啟動 Flask App
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv('PORT', 1337)), debug=True)
