@@ -1,0 +1,7 @@
+ddddocr
+Flask
+Pillow==9.0.0
+opencv-python-headless
+opencv-python
+mysql-connector-python
+gunicorn
